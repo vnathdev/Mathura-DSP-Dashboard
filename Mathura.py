@@ -173,7 +173,7 @@ def main():
     st.markdown("---")
     
     st.sidebar.header("📂 Data Source")
-    uploaded_file = st.sidebar.file_uploader("Upload Complaints Data (XLSX)", type=['xlsx'])
+    uploaded_file = st.sidebar.file_uploader("Upload Complaints Data (XLSX or CSV)", type=['xlsx', 'csv'])
 
     st.sidebar.markdown("---")
     st.sidebar.header("🧭 Navigation")
