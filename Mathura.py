@@ -200,8 +200,18 @@ def main():
 
     if uploaded_file is not None:
         try:
-            df = pd.read_excel(uploaded_file)
+            # --- NEW LOGIC: Check file type and read accordingly ---
+            if uploaded_file.name.endswith('.csv'):
+                # Read CSV (handling potential encoding issues common in CSVs)
+                df = pd.read_csv(uploaded_file, encoding='utf-8')
+            else:
+                # Read Excel
+                df = pd.read_excel(uploaded_file)
+                
+            # Process the data just like before
             df_processed = process_data(df)
+            
+            # ... (The rest of your view logic remains exactly the same) ...
             
             main_categories = sorted(df_processed['MainCategory'].unique().tolist())
             
