@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import calendar
 import altair as alt
+import re
 
 # --- MUST BE THE FIRST STREAMLIT COMMAND ---
 st.set_page_config(page_title="Mathura-Vrindavan DSP Dashboard", layout="wide", initial_sidebar_state="collapsed")
@@ -16,6 +17,8 @@ COL_CREATED     = "Complaint Registered Date"
 COL_RESOLVED    = "Closing Date"                
 COL_ZONE        = "Zone"                   
 COL_SURVEYOR    = "User"
+COL_TICKET_ID   = "compId"      # <-- NEW
+COL_WARD        = "Ward"        # <-- NEW
 
 # ==========================================
 # 2. GEOGRAPHY-SPECIFIC CONFIGURATION
@@ -32,16 +35,31 @@ CATEGORY_MAPPING = {
     "Illegal Dumping of C&D waste": "Malba",
     
     # Sanitation
-    "Muds -Silt sticking RoadSide": "Sanitation",
-    "Muds -Silt sticking Road Side": "Sanitation",
+    "Muds/Silt Sticking Roadside": "Sanitation",
     "Open-Vacant-Illegal Dumping": "Sanitation",
     "Burning of Garbage": "Sanitation",
     "Road Dust": "Sanitation",
     "Overflowing Garbage Dustbins": "Sanitation"
 }
 
-STATUS_COLUMNS = ["Open", "Pending", "Re-open", "Out of Scope", "Close"]
-UNRESOLVED_STATUSES = ["Open", "Pending", "Re-open", "Out of Scope"]
+# --- THE ULTIMATE CLEANING FUNCTION ---
+def clean_text(text):
+    s = str(text).lower()
+    # 1. Replace all whitespace (including \n newlines) with single spaces
+    s = " ".join(s.split())
+    # 2. Remove anything at the end that is NOT a letter or number
+    s = re.sub(r'[^a-z0-9]+$', '', s)
+    return s
+
+CLEAN_MAPPING = {clean_text(k): v for k, v in CATEGORY_MAPPING.items()}
+
+SUBCATEGORY_RENAME = {
+    "Muds -Silt Sticking Roadside": "Muds/Silt Sticking Roadside",
+    "Muds -Silt Sticking Road Side": "Muds/Silt Sticking Roadside"
+}
+
+STATUS_COLUMNS = ["Open", "Pending", "Re-open", "Out Of Scope", "Close"]
+UNRESOLVED_STATUSES = ["Open", "Pending", "Re-open", "Out Of Scope"]
 
 # ==========================================
 # HELPER FUNCTIONS
@@ -68,16 +86,25 @@ def display_with_fixed_footer(df, show_closure=True):
 def process_data(df):
     df.columns = df.columns.str.strip()
     
-    # Check for critical columns
     missing_cols = [col for col in [COL_SUBCATEGORY, COL_STATUS, COL_CREATED] if col not in df.columns]
     if missing_cols:
-        st.error(f"❌ Missing critical columns in Excel: {', '.join(missing_cols)}")
+        st.error(f"❌ Missing critical columns in data: {', '.join(missing_cols)}")
         st.stop()
+        
+    # --- THE SUBSTRING CATCH ---
+    is_mud = df[COL_SUBCATEGORY].astype(str).str.contains("Muds", case=False, na=False)
+    is_silt = df[COL_SUBCATEGORY].astype(str).str.contains("Silt", case=False, na=False)
+    df.loc[is_mud & is_silt, COL_SUBCATEGORY] = "Muds/Silt Sticking Roadside"
     
-    # 1. Map Categories & Filter
-    df['Subcategory_Clean'] = df[COL_SUBCATEGORY].astype(str).str.strip()
-    df['MainCategory'] = df['Subcategory_Clean'].map(CATEGORY_MAPPING)
+    # 1. Map Categories & Filter using the foolproof clean_text function
+    df['Subcategory_Clean'] = df[COL_SUBCATEGORY].apply(clean_text)
+    df['MainCategory'] = df['Subcategory_Clean'].map(CLEAN_MAPPING)
     df = df.dropna(subset=['MainCategory']).copy()
+    
+    # Format back to Title Case for UI display
+    df['Subcategory_Clean'] = df['Subcategory_Clean'].str.title()
+    df.loc[df['Subcategory_Clean'].str.contains("Muds/Silt", case=False, na=False), 'Subcategory_Clean'] = "Muds/Silt Sticking Roadside"
+    df['Subcategory_Clean'] = df['Subcategory_Clean'].replace(SUBCATEGORY_RENAME)
     
     # 2. Status Logic
     def get_bucket(status_name):
@@ -88,23 +115,16 @@ def process_data(df):
     
     # 3. Precision Date Parsing
     df[COL_CREATED] = df[COL_CREATED].astype(str).str.strip()
-    
-    # Parse "Oct 13; 2025 8:27 AM" explicitly
     exact_created = pd.to_datetime(df[COL_CREATED], format='%b %d; %Y %I:%M %p', errors='coerce')
-    # Fallback just in case the semicolon is missing in some rows
     fallback_created = pd.to_datetime(df[COL_CREATED].str.replace(';', ','), errors='coerce')
     df[COL_CREATED] = exact_created.fillna(fallback_created)
     
     if COL_RESOLVED in df.columns:
         df[COL_RESOLVED] = df[COL_RESOLVED].astype(str).str.strip()
-        
-        # Parse "mm/dd/yyyy hh:mm" (24-hour time) explicitly
         exact_resolved = pd.to_datetime(df[COL_RESOLVED], format='%m/%d/%Y %H:%M', errors='coerce')
-        # Fallback just in case
         fallback_resolved = pd.to_datetime(df[COL_RESOLVED], dayfirst=False, errors='coerce')
         df[COL_RESOLVED] = exact_resolved.fillna(fallback_resolved)
         
-        # Calculate closure times
         df['ClosureTimeDays'] = (df[COL_RESOLVED] - df[COL_CREATED]).dt.days
         df['ClosureTimeDays'] = df['ClosureTimeDays'].apply(lambda x: x if pd.notna(x) and x >= 0 else None)
     else:
@@ -173,7 +193,7 @@ def main():
     st.markdown("---")
     
     st.sidebar.header("📂 Data Source")
-    uploaded_file = st.sidebar.file_uploader("Upload Complaints Data (XLSX or CSV)", type=['xlsx', 'csv'])
+    uploaded_file = st.sidebar.file_uploader("Upload Data (XLSX or CSV)", type=['xlsx', 'csv', 'xls'])
 
     st.sidebar.markdown("---")
     st.sidebar.header("🧭 Navigation")
@@ -200,18 +220,18 @@ def main():
 
     if uploaded_file is not None:
         try:
-            # --- NEW LOGIC: Check file type and read accordingly ---
-            if uploaded_file.name.endswith('.csv'):
-                # Read CSV (handling potential encoding issues common in CSVs)
-                df = pd.read_csv(uploaded_file, encoding='utf-8')
+            file_name = uploaded_file.name.lower()
+            if file_name.endswith('.csv'):
+                df_raw = pd.read_csv(uploaded_file, encoding='utf-8')
+            elif file_name.endswith('.xlsx'):
+                df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
+            elif file_name.endswith('.xls'):
+                df_raw = pd.read_excel(uploaded_file, engine='xlrd')
             else:
-                # Read Excel
-                df = pd.read_excel(uploaded_file)
+                st.error("❌ Unsupported file format. Please upload a .csv or .xlsx file.")
+                st.stop()
                 
-            # Process the data just like before
-            df_processed = process_data(df)
-            
-            # ... (The rest of your view logic remains exactly the same) ...
+            df_processed = process_data(df_raw)
             
             main_categories = sorted(df_processed['MainCategory'].unique().tolist())
             
@@ -233,12 +253,20 @@ def main():
                     body_df = summary_table.iloc[:-1]
                     total_series = summary_table.iloc[-1]
                     
-                    st.markdown("##### 🎯 Citywide Grand Totals")
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("🔴 Total Unresolved", int(total_series['Unresolved Total']))
-                    m2.metric("🟢 Total Closed", int(total_series['Close']))
-                    m3.metric("📋 Grand Total", int(total_series['Grand Total']))
-                    m4.metric("✅ % Closure", f"{int(round(total_series['% Closure']))}%")
+                    st.markdown("##### 🎯 Individual Status Breakdown")
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("🔴 Open", int(total_series['Open']))
+                    c2.metric("🟠 Pending", int(total_series['Pending']))
+                    c3.metric("🟡 Re-open", int(total_series['Re-open']))
+                    c4.metric("⚪ Out Of Scope", int(total_series['Out Of Scope']))
+                    c5.metric("🟢 Close", int(total_series['Close']))
+                    
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown("##### 🚜 Citywide Aggregates")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("🚧 Total Unresolved", int(total_series['Unresolved Total']))
+                    m2.metric("📋 Grand Total", int(total_series['Grand Total']))
+                    m3.metric("✅ % Closure", f"{int(round(total_series['% Closure']))}%")
                     
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown("##### 📂 Category-wise Breakdown")
@@ -281,6 +309,59 @@ def main():
                         sub_df = df_processed[df_processed['MainCategory'] == main_cat]
                         if not sub_df.empty:
                             display_with_fixed_footer(generate_pivot_summary(sub_df, 'Subcategory_Clean', f"{main_cat} Total"))
+
+                # ==========================================
+                # TICKET INSPECTOR (DEEP DIVE)
+                # ==========================================
+                st.markdown("---")
+                st.subheader("🔎 Ticket Inspector (Deep Dive)")
+                st.caption("Use the filters below to pull up specific raw tickets based on the summary numbers above.")
+                
+                with st.expander("Click to Open Ticket Inspector", expanded=False):
+                    f1, f2, f3 = st.columns(3)
+                    
+                    with f1:
+                        filter_cat = st.selectbox("1. Select Main Category", ["All"] + main_categories)
+                    
+                    with f2:
+                        if filter_cat == "All":
+                            available_subs = ["All"] + sorted(df_processed['Subcategory_Clean'].dropna().unique().tolist())
+                        else:
+                            available_subs = ["All"] + sorted(df_processed[df_processed['MainCategory'] == filter_cat]['Subcategory_Clean'].dropna().unique().tolist())
+                        filter_sub = st.selectbox("2. Select Subcategory", available_subs)
+                        
+                    with f3:
+                        filter_status = st.selectbox("3. Select Status", ["All"] + STATUS_COLUMNS)
+                        
+                    deep_dive_df = df_processed.copy()
+                    if filter_cat != "All":
+                        deep_dive_df = deep_dive_df[deep_dive_df['MainCategory'] == filter_cat]
+                    if filter_sub != "All":
+                        deep_dive_df = deep_dive_df[deep_dive_df['Subcategory_Clean'] == filter_sub]
+                    if filter_status != "All":
+                        deep_dive_df = deep_dive_df[deep_dive_df['StatusBucket'] == filter_status]
+                        
+                    st.markdown(f"**Found {len(deep_dive_df)} matching tickets:**")
+                    
+                    # --- EXACT COLUMNS REQUESTED ---
+                    raw_cols = [COL_TICKET_ID, COL_ZONE, COL_WARD, COL_CREATED, 'AgeDays']
+                    
+                    # Safely keep only the columns that actually exist in the uploaded Excel file
+                    display_cols = [c for c in raw_cols if c in deep_dive_df.columns]
+                    
+                    out_df = deep_dive_df[display_cols].copy()
+                    
+                    # Rename the columns so they look clean and professional in the UI
+                    rename_mapping = {
+                        COL_TICKET_ID: "Ticket Number",
+                        COL_ZONE: "Zone",
+                        COL_WARD: "Ward",
+                        COL_CREATED: "Raised Date",
+                        'AgeDays': "Age (Days)"
+                    }
+                    out_df = out_df.rename(columns=rename_mapping)
+                    
+                    st.dataframe(out_df, use_container_width=True)
 
             elif st.session_state.current_view == "Zone-wise Drill-Down":
                 st.subheader("🗺️ Zone-wise Drill-Down")
@@ -447,12 +528,13 @@ def main():
                     if pd.isna(date_val): return None
                     if date_val.month <= 3: return f"{date_val.year - 1}-{str(date_val.year)[-2:]}"
                     else: return f"{date_val.year}-{str(date_val.year + 1)[-2:]}"
+                
                 def get_fy_q(date_val):
                     if pd.isna(date_val): return None
-                    if date_val.month in [4, 5, 6]: return "Q1"
-                    elif date_val.month in [7, 8, 9]: return "Q2"
-                    elif date_val.month in [10, 11, 12]: return "Q3"
-                    else: return "Q4"
+                    if date_val.month in [4, 5, 6]: return "Q1 (Apr-Jun)"
+                    elif date_val.month in [7, 8, 9]: return "Q2 (Jul-Sep)"
+                    elif date_val.month in [10, 11, 12]: return "Q3 (Oct-Dec)"
+                    else: return "Q4 (Jan-Mar)"
 
                 fy_df = df_processed.copy()
                 fy_df['FY'] = fy_df[COL_CREATED].apply(get_fy)
@@ -490,8 +572,10 @@ def main():
                             q_resolved = pd.Series(dtype=int, name="Resolved Same Quarter")
                         
                         quarter_summary = pd.concat([q_raised, q_total_closed, q_resolved], axis=1).fillna(0).astype(int)
-                        for q in ['Q1', 'Q2', 'Q3', 'Q4']:
+                        
+                        for q in ['Q1 (Apr-Jun)', 'Q2 (Jul-Sep)', 'Q3 (Oct-Dec)', 'Q4 (Jan-Mar)']:
                             if q not in quarter_summary.index: quarter_summary.loc[q] = [0, 0, 0]
+                        
                         quarter_summary = quarter_summary.sort_index()
                         quarter_summary['% Resolved Same Quarter'] = ((quarter_summary['Resolved Same Quarter'] / quarter_summary['Tickets Raised']) * 100).fillna(0).round(1)
                         
@@ -521,8 +605,10 @@ def main():
                                 sm_closed = pd.Series(dtype=int, name="Closed Same Quarter")
                                 
                             sm_trend = pd.concat([sm_raised, sm_closed], axis=1).fillna(0).astype(int)
-                            for q in ['Q1', 'Q2', 'Q3', 'Q4']:
+                            
+                            for q in ['Q1 (Apr-Jun)', 'Q2 (Jul-Sep)', 'Q3 (Oct-Dec)', 'Q4 (Jan-Mar)']:
                                 if q not in sm_trend.index: sm_trend.loc[q] = [0, 0]
+                            
                             sm_trend = sm_trend.sort_index()
                             sm_trend['Gap (Unresolved)'] = sm_trend['Tickets Raised'] - sm_trend['Closed Same Quarter']
                             sm_trend['% Resolved Same Quarter'] = ((sm_trend['Closed Same Quarter'] / sm_trend['Tickets Raised']) * 100).fillna(0).round(1)
@@ -554,7 +640,7 @@ def main():
             st.error(f"❌ Error: {str(e)}")
             st.exception(e)
     else:
-        st.info("👆 Please upload the Complaints Data file in the sidebar to begin.")
+        st.info("👆 Please upload the Data file in the sidebar to begin.")
 
 if __name__ == "__main__":
     main()
