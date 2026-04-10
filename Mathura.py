@@ -9,16 +9,23 @@ import re
 st.set_page_config(page_title="Mathura-Vrindavan DSP Dashboard", layout="wide", initial_sidebar_state="collapsed")
 
 # ==========================================
-# 1. EXCEL COLUMN HEADERS
+# 1. EXCEL COLUMN HEADERS & URLS
 # ==========================================
 COL_SUBCATEGORY = "complaintsubtype"            
 COL_STATUS      = "Status"                 
 COL_CREATED     = "Complaint Registered Date"   
 COL_RESOLVED    = "Closing Date"                
 COL_ZONE        = "Zone"                   
-COL_SURVEYOR    = "User"
-COL_TICKET_ID   = "compId"      # <-- NEW
-COL_WARD        = "Ward"        # <-- NEW
+COL_SURVEYOR    = "Name"          
+COL_TICKET_ID   = "compId"      
+COL_WARD        = "Ward"        
+COL_BEFORE_IMG  = "Before Image"  
+COL_AFTER_IMG   = "After Image"   
+
+# --- Google Sheet URLs ---
+CIVIL_SHEET_URL = "https://docs.google.com/spreadsheets/d/13UGuRQVHLWtStw5HrH6muUDlheaFj6agV7NNH8I6NP8/export?format=csv&gid=0"
+SANITATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/13UGuRQVHLWtStw5HrH6muUDlheaFj6agV7NNH8I6NP8/export?format=csv&gid=427454925"
+SURVEYOR_LIST_SHEET_URL = "https://docs.google.com/spreadsheets/d/13UGuRQVHLWtStw5HrH6muUDlheaFj6agV7NNH8I6NP8/export?format=csv&gid=1158320892" 
 
 # ==========================================
 # 2. GEOGRAPHY-SPECIFIC CONFIGURATION
@@ -42,12 +49,17 @@ CATEGORY_MAPPING = {
     "Overflowing Garbage Dustbins": "Sanitation"
 }
 
+ZONE_TRANSLATION = {
+    "Aurangabad": "3-Aurangabad",
+    "Mathura": "1-City",
+    "Bhuteswar": "2-Bhuteswar",
+    "Vrindavan": "4-Vrindavan"
+}
+
 # --- THE ULTIMATE CLEANING FUNCTION ---
 def clean_text(text):
     s = str(text).lower()
-    # 1. Replace all whitespace (including \n newlines) with single spaces
     s = " ".join(s.split())
-    # 2. Remove anything at the end that is NOT a letter or number
     s = re.sub(r'[^a-z0-9]+$', '', s)
     return s
 
@@ -64,6 +76,60 @@ UNRESOLVED_STATUSES = ["Open", "Pending", "Re-open", "Out Of Scope"]
 # ==========================================
 # HELPER FUNCTIONS
 # ==========================================
+
+@st.cache_data(ttl=600)
+def load_authorized_surveyors():
+    """Fetches the authorized surveyor list from the specific Google Sheet."""
+    try:
+        df = pd.read_csv(SURVEYOR_LIST_SHEET_URL)
+        if not df.empty:
+            col = df.columns[0]
+            valid_names = df[col].astype(str).str.strip().tolist()
+            return [n for n in valid_names if n.lower() != 'nan' and n != '']
+        return []
+    except Exception as e:
+        st.error(f"⚠️ Could not load Surveyor List from Google Sheets. Error: {e}")
+        return []
+
+def process_single_roster_sheet(url, sheet_name, sup_col, mgr_col):
+    try:
+        roster_df = pd.read_csv(url)
+        roster_df.columns = roster_df.columns.astype(str).str.strip()
+        
+        if 'Ward no.' in roster_df.columns and COL_WARD in roster_df.columns:
+            roster_df = roster_df.drop(columns=[COL_WARD])
+        if 'Ward no.' in roster_df.columns:
+            roster_df = roster_df.rename(columns={'Ward no.': COL_WARD})
+            
+        roster_df = roster_df.loc[:, ~roster_df.columns.duplicated()].copy()
+        
+        if COL_WARD in roster_df.columns and isinstance(roster_df[COL_WARD], pd.DataFrame):
+            roster_df[COL_WARD] = roster_df[COL_WARD].iloc[:, 0]
+        if 'Zone' in roster_df.columns and isinstance(roster_df['Zone'], pd.DataFrame):
+            roster_df['Zone'] = roster_df['Zone'].iloc[:, 0]
+            
+        if sup_col in roster_df.columns:
+            roster_df = roster_df.rename(columns={sup_col: 'Standard_Supervisor'})
+        if mgr_col in roster_df.columns:
+            roster_df = roster_df.rename(columns={mgr_col: 'Standard_Manager'})
+            
+        return roster_df
+    except Exception as e:
+        st.error(f"⚠️ Could not load {sheet_name} Officer Roster. Error: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def load_officer_roster():
+    civil_df = process_single_roster_sheet(CIVIL_SHEET_URL, "Civil", "Supervisor Name", "JE Name")
+    sanitation_df = process_single_roster_sheet(SANITATION_SHEET_URL, "Sanitation", "Supervisor Name", "SFI Name")
+    
+    combined_roster = pd.concat([civil_df, sanitation_df], ignore_index=True)
+    
+    if COL_WARD in combined_roster.columns:
+        combined_roster[COL_WARD] = combined_roster[COL_WARD].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        combined_roster[COL_WARD] = combined_roster[COL_WARD].str.replace(r'(?i)pratap nagar', 'Pratam Nagar', regex=True)
+        
+    return combined_roster
 
 def display_with_fixed_footer(df, show_closure=True):
     if df.empty:
@@ -91,29 +157,88 @@ def process_data(df):
         st.error(f"❌ Missing critical columns in data: {', '.join(missing_cols)}")
         st.stop()
         
-    # --- THE SUBSTRING CATCH ---
+    if COL_WARD in df.columns:
+        df[COL_WARD] = df[COL_WARD].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        df[COL_WARD] = df[COL_WARD].str.replace(r'(?i)pratap nagar', 'Pratam Nagar', regex=True)
+        
+    if COL_SURVEYOR in df.columns:
+        df[COL_SURVEYOR] = df[COL_SURVEYOR].astype(str).str.strip()
+        
     is_mud = df[COL_SUBCATEGORY].astype(str).str.contains("Muds", case=False, na=False)
     is_silt = df[COL_SUBCATEGORY].astype(str).str.contains("Silt", case=False, na=False)
     df.loc[is_mud & is_silt, COL_SUBCATEGORY] = "Muds/Silt Sticking Roadside"
     
-    # 1. Map Categories & Filter using the foolproof clean_text function
     df['Subcategory_Clean'] = df[COL_SUBCATEGORY].apply(clean_text)
     df['MainCategory'] = df['Subcategory_Clean'].map(CLEAN_MAPPING)
     df = df.dropna(subset=['MainCategory']).copy()
     
-    # Format back to Title Case for UI display
     df['Subcategory_Clean'] = df['Subcategory_Clean'].str.title()
     df.loc[df['Subcategory_Clean'].str.contains("Muds/Silt", case=False, na=False), 'Subcategory_Clean'] = "Muds/Silt Sticking Roadside"
     df['Subcategory_Clean'] = df['Subcategory_Clean'].replace(SUBCATEGORY_RENAME)
     
-    # 2. Status Logic
+    # ==========================================
+    # --- FOOLPROOF ROSTER MERGE ---
+    # ==========================================
+    roster_df = load_officer_roster()
+    
+    if not roster_df.empty and 'Zone' in roster_df.columns and COL_WARD in roster_df.columns and 'Department' in roster_df.columns:
+        
+        def normalize_zone(z):
+            z = str(z).lower()
+            if 'bhutes' in z: return 'bhuteswar'
+            if 'aurang' in z: return 'aurangabad'
+            if 'vrind' in z: return 'vrindavan'
+            if 'mathura' in z or 'city' in z or '1-' in z: return 'mathura'
+            return z.strip()
+
+        df['Match_Zone'] = df[COL_ZONE].apply(normalize_zone)
+        df['Match_Ward'] = df[COL_WARD].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+        df['Match_Dept'] = df['MainCategory'].apply(lambda x: 'civil' if x in ['Civil', 'Malba'] else 'sanitation')
+        
+        roster_df['Match_Zone'] = roster_df['Zone'].apply(normalize_zone)
+        roster_df['Match_Ward'] = roster_df[COL_WARD].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+        
+        def clean_dept_roster(d):
+            d = str(d).lower()
+            if 'san' in d: return 'sanitation'
+            if 'civ' in d: return 'civil'
+            return d.strip()
+        roster_df['Match_Dept'] = roster_df['Department'].apply(clean_dept_roster)
+        
+        cols_to_pull = ['Match_Zone', 'Match_Ward', 'Match_Dept']
+        if 'Standard_Supervisor' in roster_df.columns: cols_to_pull.append('Standard_Supervisor')
+        if 'Standard_Manager' in roster_df.columns: cols_to_pull.append('Standard_Manager')
+            
+        roster_clean = roster_df[cols_to_pull].drop_duplicates(subset=['Match_Zone', 'Match_Ward', 'Match_Dept'])
+        
+        df = pd.merge(df, roster_clean, on=['Match_Zone', 'Match_Ward', 'Match_Dept'], how='left')
+        
+        if 'Standard_Supervisor' in df.columns:
+            df = df.rename(columns={'Standard_Supervisor': 'Supervisor'})
+        else:
+            df['Supervisor'] = 'Column Missing'
+            
+        if 'Standard_Manager' in df.columns:
+            df = df.rename(columns={'Standard_Manager': 'SFI/JE'})
+        else:
+            df['SFI/JE'] = 'Column Missing'
+            
+        df['Supervisor'] = df['Supervisor'].fillna('Unassigned')
+        df['SFI/JE'] = df['SFI/JE'].fillna('Unassigned')
+        
+        df = df.drop(columns=['Match_Zone', 'Match_Ward', 'Match_Dept'])
+        
+    else:
+        df['Supervisor'] = 'Roster Unavailable'
+        df['SFI/JE'] = 'Roster Unavailable'
+    # ==========================================
+    
     def get_bucket(status_name):
         s = str(status_name).strip()
         if s in STATUS_COLUMNS: return s
         return "Open"
     df['StatusBucket'] = df[COL_STATUS].apply(get_bucket)
     
-    # 3. Precision Date Parsing
     df[COL_CREATED] = df[COL_CREATED].astype(str).str.strip()
     exact_created = pd.to_datetime(df[COL_CREATED], format='%b %d; %Y %I:%M %p', errors='coerce')
     fallback_created = pd.to_datetime(df[COL_CREATED].str.replace(';', ','), errors='coerce')
@@ -130,7 +255,6 @@ def process_data(df):
     else:
         df['ClosureTimeDays'] = None
         
-    # 4. Aging
     now = datetime.now()
     df['AgeDays'] = (now - df[COL_CREATED]).dt.days
     
@@ -205,6 +329,7 @@ def main():
         "Main Category Summary",
         "Subcategory Drill-Down",
         "Zone-wise Drill-Down",
+        "Officer Leaderboard", 
         "Age-wise Pendency",
         "Monthly Trend Analysis",
         "Custom Date Range Analysis",
@@ -333,6 +458,17 @@ def main():
                     with f3:
                         filter_status = st.selectbox("3. Select Status", ["All"] + STATUS_COLUMNS)
                         
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    
+                    d1, d2 = st.columns([1, 2])
+                    with d1:
+                        use_date = st.checkbox("📅 Filter by Date Range")
+                    with d2:
+                        if use_date:
+                            min_date = df_processed[COL_CREATED].min().date()
+                            max_date = df_processed[COL_CREATED].max().date()
+                            filter_dates = st.date_input("4. Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+                        
                     deep_dive_df = df_processed.copy()
                     if filter_cat != "All":
                         deep_dive_df = deep_dive_df[deep_dive_df['MainCategory'] == filter_cat]
@@ -341,27 +477,152 @@ def main():
                     if filter_status != "All":
                         deep_dive_df = deep_dive_df[deep_dive_df['StatusBucket'] == filter_status]
                         
+                    if use_date and len(filter_dates) == 2:
+                        start_d, end_d = filter_dates
+                        deep_dive_df = deep_dive_df[(deep_dive_df[COL_CREATED].dt.date >= start_d) & (deep_dive_df[COL_CREATED].dt.date <= end_d)]
+                        
                     st.markdown(f"**Found {len(deep_dive_df)} matching tickets:**")
                     
-                    # --- EXACT COLUMNS REQUESTED ---
-                    raw_cols = [COL_TICKET_ID, COL_ZONE, COL_WARD, COL_CREATED, 'AgeDays']
-                    
-                    # Safely keep only the columns that actually exist in the uploaded Excel file
+                    raw_cols = [COL_TICKET_ID, COL_ZONE, COL_WARD, COL_CREATED, 'AgeDays', COL_BEFORE_IMG, COL_AFTER_IMG]
                     display_cols = [c for c in raw_cols if c in deep_dive_df.columns]
                     
                     out_df = deep_dive_df[display_cols].copy()
                     
-                    # Rename the columns so they look clean and professional in the UI
                     rename_mapping = {
                         COL_TICKET_ID: "Ticket Number",
                         COL_ZONE: "Zone",
                         COL_WARD: "Ward",
                         COL_CREATED: "Raised Date",
-                        'AgeDays': "Age (Days)"
+                        'AgeDays': "Age (Days)",
+                        COL_BEFORE_IMG: "Before Image Link",
+                        COL_AFTER_IMG: "After Image Link"
                     }
                     out_df = out_df.rename(columns=rename_mapping)
                     
-                    st.dataframe(out_df, use_container_width=True)
+                    st.dataframe(
+                        out_df, 
+                        use_container_width=True,
+                        column_config={
+                            "Before Image Link": st.column_config.ImageColumn("Before Image Preview"),
+                            "After Image Link": st.column_config.ImageColumn("After Image Preview")
+                        }
+                    )
+
+            # ==========================================
+            # OFFICER LEADERBOARD
+            # ==========================================
+            elif st.session_state.current_view == "Officer Leaderboard":
+                st.subheader("🏆 Officer Leaderboard & Pendency Tracking")
+                st.caption("Live mappings pulled from Google Sheets.")
+                
+                if 'Supervisor' not in df_processed.columns or 'SFI/JE' not in df_processed.columns:
+                    st.warning("⚠️ Officer mapping columns not found. Check Google Sheet connectivity.")
+                else:
+                    unresolved_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
+                    ignore_list = ['Unassigned', 'Roster Unavailable', 'Column Missing']
+                    
+                    unmapped_df = unresolved_df[unresolved_df['Supervisor'].isin(ignore_list)]
+                    unmapped_count = unmapped_df.shape[0]
+                    
+                    if unmapped_count > 0:
+                        st.error(f"⚠️ **{unmapped_count} unresolved tickets** could not be mapped to an officer because the Zone/Ward/Dept combination does not match either Google Sheet. They are hidden from this leaderboard.")
+                        
+                        csv = unmapped_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="⬇️ Download Unmapped Tickets (CSV)",
+                            data=csv,
+                            file_name=f"unmapped_tickets_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv",
+                            type="secondary"
+                        )
+                    
+                    valid_unresolved = unresolved_df[
+                        (~unresolved_df['Supervisor'].isin(ignore_list)) & 
+                        (~unresolved_df['SFI/JE'].isin(ignore_list))
+                    ]
+                    
+                    sanitation_df = valid_unresolved[valid_unresolved['MainCategory'] == 'Sanitation']
+                    civil_df = valid_unresolved[valid_unresolved['MainCategory'] == 'Civil']
+                    malba_df = valid_unresolved[valid_unresolved['MainCategory'] == 'Malba']
+                    
+                    st.markdown("### 🥇 Top & Bottom 5 Performers")
+                    st.caption("Ranked by lowest and highest number of currently unresolved tickets.")
+                    
+                    t1, t2, t3 = st.tabs(["🧹 Sanitation", "🏗️ Civil", "🚜 Malba"])
+                    
+                    def draw_leaderboard(df_to_use, group_col, role_label):
+                        if df_to_use.empty:
+                            st.info(f"No unresolved tickets found for {role_label}s in this category.")
+                            return
+                        
+                        counts = df_to_use.groupby(group_col).size().reset_index(name='Total Unresolved Tickets')
+                        counts = counts.sort_values('Total Unresolved Tickets', ascending=True).reset_index(drop=True)
+                        counts.columns = [f"{role_label} Name", 'Total Unresolved Tickets']
+                        
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.success(f"🌟 Top 5 {role_label}s (Least Pendency)")
+                            top_5 = counts.head(5).copy()
+                            top_5.index = top_5.index + 1  
+                            st.dataframe(top_5, use_container_width=True)
+                            
+                        with c2:
+                            st.error(f"⚠️ Bottom 5 {role_label}s (Highest Pendency)")
+                            bottom_5 = counts.tail(5).sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
+                            bottom_5.index = bottom_5.index + 1  
+                            st.dataframe(bottom_5, use_container_width=True)
+
+                    with t1:
+                        st.markdown("##### 👷 Supervisors")
+                        draw_leaderboard(sanitation_df, 'Supervisor', 'Supervisor')
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown("##### 👔 SFIs")
+                        draw_leaderboard(sanitation_df, 'SFI/JE', 'SFI')
+                        
+                    with t2:
+                        st.markdown("##### 👷 Supervisors")
+                        draw_leaderboard(civil_df, 'Supervisor', 'Supervisor')
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown("##### 👔 JEs")
+                        draw_leaderboard(civil_df, 'SFI/JE', 'JE')
+
+                    with t3:
+                        st.markdown("##### 👷 Supervisors")
+                        draw_leaderboard(malba_df, 'Supervisor', 'Supervisor')
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown("##### 👔 JEs")
+                        draw_leaderboard(malba_df, 'SFI/JE', 'JE')
+                        
+                    st.markdown("---")
+                    st.markdown("### 🔍 Filtered Officer Pendency View")
+                    
+                    f1, f2, f3 = st.columns(3)
+                    with f1: f_cat = st.selectbox("Category", ["All"] + main_categories)
+                    with f2: f_zone = st.selectbox("Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist()))
+                    with f3: role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True)
+                    
+                    filt_df = valid_unresolved.copy()
+                    if f_cat != "All": filt_df = filt_df[filt_df['MainCategory'] == f_cat]
+                    if f_zone != "All": filt_df = filt_df[filt_df[COL_ZONE] == f_zone]
+                    
+                    target_col = 'Supervisor' if role_type == "Supervisor" else 'SFI/JE'
+                    
+                    if not filt_df.empty:
+                        officer_list = ["All"] + sorted(filt_df[target_col].dropna().unique().tolist())
+                        f_officer = st.selectbox(f"Select Specific Officer", officer_list)
+                        
+                        if f_officer != "All":
+                            filt_df = filt_df[filt_df[target_col] == f_officer]
+                            
+                        final_table = filt_df.groupby(target_col).size().reset_index(name='Total Unresolved Tickets')
+                        final_table = final_table.sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
+                        final_table.columns = ['Officer Name', 'Total Unresolved Tickets']
+                        
+                        final_table.index = final_table.index + 1
+                        
+                        st.dataframe(final_table, use_container_width=True)
+                    else:
+                        st.info("No unresolved tickets found matching those filters.")
 
             elif st.session_state.current_view == "Zone-wise Drill-Down":
                 st.subheader("🗺️ Zone-wise Drill-Down")
@@ -386,16 +647,84 @@ def main():
                     else:
                         st.warning("No data found.")
 
+            # ==========================================
+            # AGE-WISE PENDENCY
+            # ==========================================
             elif st.session_state.current_view == "Age-wise Pendency":
                 st.subheader("⏳ Age-wise Pendency Analysis")
-                b5_cat = st.selectbox("Select Category", main_categories)
                 
-                # Filter to only show unresolved items
-                age_df = df_processed[(df_processed['MainCategory'] == b5_cat) & (df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES))]
+                # --- 1. Summary Table ---
+                b5_cat = st.selectbox("Select Category", ["All Categories"] + main_categories)
+                
+                if b5_cat != "All Categories":
+                    age_df = df_processed[(df_processed['MainCategory'] == b5_cat) & (df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES))]
+                    grouping_col = 'Subcategory_Clean'
+                else:
+                    age_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)]
+                    grouping_col = 'MainCategory'
+                    
                 if not age_df.empty:
-                    st.dataframe(generate_aging_summary(age_df, 'Subcategory_Clean'), use_container_width=True)
+                    st.markdown("##### 📊 Age-wise Summary")
+                    st.dataframe(generate_aging_summary(age_df, grouping_col), use_container_width=True)
                 else:
                     st.success("No unresolved tickets found for this category.")
+                    
+                st.markdown("---")
+                st.subheader("🔎 Pendency Ticket Inspector")
+                
+                # --- 2. Ticket Inspector ---
+                with st.expander("Click to Open Pendency Inspector", expanded=False):
+                    f1, f2, f3 = st.columns(3)
+                    
+                    with f1:
+                        filter_cat_age = st.selectbox("1. Category", ["All"] + main_categories, key="insp_cat_age")
+                        
+                    with f2:
+                        if filter_cat_age == "All":
+                            available_subs_age = ["All"] + sorted(df_processed['Subcategory_Clean'].dropna().unique().tolist())
+                        else:
+                            available_subs_age = ["All"] + sorted(df_processed[df_processed['MainCategory'] == filter_cat_age]['Subcategory_Clean'].dropna().unique().tolist())
+                        filter_sub_age = st.selectbox("2. Subcategory", available_subs_age, key="insp_sub_age")
+                        
+                    with f3:
+                        age_buckets = ['< 1 Month', '1-6 Months', '6-12 Months', '> 1 Year']
+                        filter_age_bucket = st.selectbox("3. Age Bucket", ["All"] + age_buckets)
+                        
+                    insp_age_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
+                    
+                    if filter_cat_age != "All":
+                        insp_age_df = insp_age_df[insp_age_df['MainCategory'] == filter_cat_age]
+                    if filter_sub_age != "All":
+                        insp_age_df = insp_age_df[insp_age_df['Subcategory_Clean'] == filter_sub_age]
+                    if filter_age_bucket != "All":
+                        insp_age_df = insp_age_df[insp_age_df['AgeBucket'] == filter_age_bucket]
+                        
+                    st.markdown(f"**Found {len(insp_age_df)} pending tickets:**")
+                    
+                    raw_cols_age = [COL_TICKET_ID, COL_CREATED, COL_ZONE, COL_WARD, 'SFI/JE', 'Supervisor', COL_BEFORE_IMG]
+                    display_cols_age = [c for c in raw_cols_age if c in insp_age_df.columns]
+                    
+                    out_age_df = insp_age_df[display_cols_age].copy()
+                    
+                    rename_mapping_age = {
+                        COL_TICKET_ID: "Ticket Number",
+                        COL_CREATED: "Raised Date",
+                        COL_ZONE: "Zone",
+                        COL_WARD: "Ward",
+                        'SFI/JE': "SFI/JE Name",
+                        'Supervisor': "Supervisor Name",
+                        COL_BEFORE_IMG: "Before Image"
+                    }
+                    out_age_df = out_age_df.rename(columns=rename_mapping_age)
+                    
+                    st.dataframe(
+                        out_age_df, 
+                        use_container_width=True,
+                        column_config={
+                            "Before Image": st.column_config.ImageColumn("Before Image"),
+                            "Raised Date": st.column_config.DatetimeColumn("Raised Date", format="DD MMM YYYY, HH:mm")
+                        }
+                    )
 
             elif st.session_state.current_view == "Monthly Trend Analysis":
                 st.subheader("📅 Monthly Trend Analysis")
@@ -616,12 +945,25 @@ def main():
                             st.dataframe(sm_trend, use_container_width=True, column_config={"% Resolved Same Quarter": st.column_config.NumberColumn(format="%.1f%%")})
                             st.line_chart(sm_trend[['Tickets Raised', 'Closed Same Quarter']], use_container_width=True)
 
+            # ==========================================
+            # SURVEYOR PERFORMANCE
+            # ==========================================
             elif st.session_state.current_view == "Surveyor Performance":
-                st.subheader("📝 Surveyor Performance")
+                st.subheader("📝 Surveyor Performance & Operations")
+                
                 if COL_SURVEYOR in df_processed.columns:
+                    auth_surveyors = load_authorized_surveyors()
+                    if auth_surveyors:
+                        view_df = df_processed[df_processed[COL_SURVEYOR].isin(auth_surveyors)].copy()
+                        if view_df.empty:
+                            st.warning("⚠️ None of the names in the uploaded data matched the authorized Google Sheet Surveyor list.")
+                    else:
+                        view_df = df_processed.copy()
+                        
+                    st.markdown("### 🏆 Top Surveyors Overview")
                     if all_years:
-                        surveyor_year = st.selectbox("Select Year", all_years)
-                        surveyor_df = df_processed[df_processed[COL_CREATED].dt.year == surveyor_year]
+                        surveyor_year = st.selectbox("Select Year for Overview", all_years, key="surv_year")
+                        surveyor_df = view_df[view_df[COL_CREATED].dt.year == surveyor_year]
                         if not surveyor_df.empty:
                             user_ticket_counts = surveyor_df[COL_SURVEYOR].value_counts()
                             top_users = user_ticket_counts[user_ticket_counts >= 100].index.tolist()
@@ -632,7 +974,95 @@ def main():
                                 surveyor_pivot.index.name = "Month"
                                 st.dataframe(surveyor_pivot, use_container_width=True)
                             else:
-                                st.info(f"No surveyor raised 100+ tickets in {surveyor_year}.")
+                                st.info(f"No authorized surveyor raised 100+ tickets in {surveyor_year}.")
+                    
+                    st.markdown("---")
+                    
+                    st.markdown("### 🔍 Surveyor Deep Dive & Inspector")
+                    
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        min_date = view_df[COL_CREATED].min().date()
+                        max_date = view_df[COL_CREATED].max().date()
+                        surv_dates = st.date_input("1. Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="surv_dates")
+                    with c2:
+                        all_surveyors = sorted(view_df[COL_SURVEYOR].dropna().unique().tolist())
+                        selected_surv = st.selectbox("2. Select Surveyor", ["Select a Surveyor..."] + all_surveyors)
+                        
+                    if len(surv_dates) == 2 and selected_surv != "Select a Surveyor...":
+                        start_d, end_d = surv_dates
+                        mask = (
+                            (view_df[COL_CREATED].dt.date >= start_d) & 
+                            (view_df[COL_CREATED].dt.date <= end_d) & 
+                            (view_df[COL_SURVEYOR] == selected_surv)
+                        )
+                        surv_filtered_df = view_df[mask].copy()
+                        
+                        if not surv_filtered_df.empty:
+                            st.markdown(f"**Category-wise Tickets for {selected_surv}**")
+                            cat_counts = surv_filtered_df['MainCategory'].value_counts().reset_index()
+                            cat_counts.columns = ['Category', 'Tickets Raised']
+                            cat_counts.index = cat_counts.index + 1
+                            st.dataframe(cat_counts, use_container_width=True)
+                            
+                            st.markdown(f"**Detailed Tickets ({len(surv_filtered_df)} found)**")
+                            raw_cols = [COL_TICKET_ID, COL_CREATED, COL_STATUS, COL_WARD, COL_ZONE, COL_BEFORE_IMG, COL_AFTER_IMG]
+                            display_cols = [c for c in raw_cols if c in surv_filtered_df.columns]
+                            
+                            out_df = surv_filtered_df[display_cols].copy()
+                            rename_mapping = {
+                                COL_TICKET_ID: "Ticket Number",
+                                COL_CREATED: "Raised Date",
+                                COL_STATUS: "Status",
+                                COL_WARD: "Ward",
+                                COL_ZONE: "Zone",
+                                COL_BEFORE_IMG: "Before Image",
+                                COL_AFTER_IMG: "After Image"
+                            }
+                            out_df = out_df.rename(columns=rename_mapping)
+                            
+                            st.dataframe(
+                                out_df, 
+                                use_container_width=True,
+                                column_config={
+                                    "Before Image": st.column_config.ImageColumn("Before Image"),
+                                    "After Image": st.column_config.ImageColumn("After Image"),
+                                    "Raised Date": st.column_config.DatetimeColumn("Raised Date", format="DD MMM YYYY, HH:mm")
+                                }
+                            )
+                        else:
+                            st.info("No tickets found for this surveyor in the selected date range.")
+                            
+                    st.markdown("---")
+                    
+                    st.markdown("### 📅 Ward Survey Schedule")
+                    st.caption("Tracks the last ticket raised by an authorized surveyor in each ward and projects the next 30-day survey deadline.")
+                    
+                    schedule_zone = st.selectbox("Select Zone for Schedule", ["All"] + sorted(view_df[COL_ZONE].dropna().unique().tolist()))
+                    
+                    sched_df = view_df.copy()
+                    if schedule_zone != "All":
+                        sched_df = sched_df[sched_df[COL_ZONE] == schedule_zone]
+                        
+                    if not sched_df.empty:
+                        schedule_summary = sched_df.groupby(COL_WARD)[COL_CREATED].max().reset_index()
+                        schedule_summary.columns = ['Ward', 'Last Survey Date']
+                        
+                        schedule_summary['Next Survey Due Date'] = schedule_summary['Last Survey Date'] + pd.Timedelta(days=30)
+                        schedule_summary = schedule_summary.sort_values('Next Survey Due Date', ascending=True).reset_index(drop=True)
+                        schedule_summary.index = schedule_summary.index + 1
+                        
+                        st.dataframe(
+                            schedule_summary, 
+                            use_container_width=True,
+                            column_config={
+                                "Last Survey Date": st.column_config.DateColumn("Last Survey Date", format="DD MMM YYYY"),
+                                "Next Survey Due Date": st.column_config.DateColumn("Next Survey Due Date", format="DD MMM YYYY")
+                            }
+                        )
+                    else:
+                        st.warning("No data available for this zone.")
+
                 else:
                     st.warning(f"⚠️ Column '{COL_SURVEYOR}' not found.")
 
