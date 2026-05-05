@@ -430,21 +430,16 @@ def main():
                     ).properties(height=350)
                     st.altair_chart(pie_chart, use_container_width=True)
 
-                # --- NEW: Download Processed Data Functionality ---
                 st.markdown("---")
                 st.subheader("📥 Download Processed Data")
                 st.caption("Download the full dataset with the Closing Date split into separate Date and Time columns.")
                 
                 dl_df = df_processed.copy()
                 if COL_RESOLVED in dl_df.columns:
-                    # Convert to datetime to cleanly extract date and time
                     temp_resolved = pd.to_datetime(dl_df[COL_RESOLVED], errors='coerce')
-                    # Insert the 'Closing Time' column immediately after 'Closing Date'
                     dl_df.insert(dl_df.columns.get_loc(COL_RESOLVED) + 1, 'Closing Time', temp_resolved.dt.strftime('%H:%M:%S'))
-                    # Reformat the 'Closing Date' column to DD/MM/YYYY
                     dl_df[COL_RESOLVED] = temp_resolved.dt.strftime('%d/%m/%Y')
                     
-                # Export to an in-memory Excel file
                 buffer_dl = io.BytesIO()
                 with pd.ExcelWriter(buffer_dl, engine='openpyxl') as writer:
                     dl_df.to_excel(writer, index=False, sheet_name='Processed_Data')
@@ -693,7 +688,13 @@ def main():
                     with f4: 
                         role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True, key="f_off_role")
                     
-                    filt_df = valid_unresolved.copy()
+                    # --- NEW: Use valid_full_df so we can count 'Close' tickets for Closure % ---
+                    valid_full_df = df_processed[
+                        (~df_processed['Supervisor'].isin(ignore_list)) & 
+                        (~df_processed['SFI/JE'].isin(ignore_list))
+                    ]
+                    
+                    filt_df = valid_full_df.copy()
                     if f_cat != "All": filt_df = filt_df[filt_df['MainCategory'] == f_cat]
                     if f_sub != "All": filt_df = filt_df[filt_df['Subcategory_Clean'] == f_sub]
                     if f_zone != "All": filt_df = filt_df[filt_df[COL_ZONE] == f_zone]
@@ -708,26 +709,38 @@ def main():
                             filt_df = filt_df[filt_df[target_col] == f_officer]
                             
                         if not filt_df.empty:
+                            # Group by officer and all statuses
                             status_counts = filt_df.groupby([target_col, 'StatusBucket']).size().unstack(fill_value=0)
                             
-                            for s in UNRESOLVED_STATUSES:
+                            # Ensure all base statuses are columns
+                            for s in STATUS_COLUMNS:
                                 if s not in status_counts.columns:
                                     status_counts[s] = 0
                                     
                             status_counts['Total Unresolved Tickets'] = status_counts[UNRESOLVED_STATUSES].sum(axis=1)
+                            status_counts['Total Closed'] = status_counts['Close']
+                            status_counts['Grand Total'] = status_counts['Total Unresolved Tickets'] + status_counts['Total Closed']
+                            
+                            # Calculate Closure %
+                            status_counts['Closure %'] = ((status_counts['Total Closed'] / status_counts['Grand Total']) * 100).fillna(0).round(1)
+                            
                             status_counts = status_counts.sort_values('Total Unresolved Tickets', ascending=False).reset_index()
                             status_counts = status_counts.rename(columns={target_col: 'Officer Name'})
                             
-                            cols_order = ['Officer Name', 'Total Unresolved Tickets'] + UNRESOLVED_STATUSES
+                            cols_order = ['Officer Name', 'Total Unresolved Tickets'] + UNRESOLVED_STATUSES + ['Total Closed', 'Grand Total', 'Closure %']
                             final_table = status_counts[cols_order]
                             
                             final_table.index = final_table.index + 1
                             
-                            st.dataframe(final_table, use_container_width=True)
+                            st.dataframe(
+                                final_table, 
+                                use_container_width=True,
+                                column_config={"Closure %": st.column_config.NumberColumn(format="%.1f%%")}
+                            )
                         else:
-                            st.info("No unresolved tickets found matching those filters.")
+                            st.info("No tickets found matching those filters.")
                     else:
-                        st.info("No unresolved tickets found matching those filters.")
+                        st.info("No tickets found matching those filters.")
 
             elif st.session_state.current_view == "Age-wise Pendency":
                 st.subheader("⏳ Age-wise Pendency Analysis")
