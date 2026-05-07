@@ -376,6 +376,17 @@ def main():
             
             if st.session_state.current_view == "Main Category Summary":
                 st.subheader("📈 Main Category Summary")
+                
+                # --- NEW: UPAAY Dashboard (Legacy Data) explicitly placed here ---
+                with st.container():
+                    st.markdown("##### 🏛️ UPAAY Dashboard (Legacy Data)")
+                    u1, u2, u3, u4 = st.columns(4)
+                    u1.metric("⏱️ Short Term", "8,819")
+                    u2.metric("🚜 Malba", "95")
+                    u3.metric("📅 Long Term", "227")
+                    u4.metric("📋 Total", "9,551")
+                st.markdown("---")
+                
                 summary_table = generate_pivot_summary(df_processed, 'MainCategory', "TOTAL")
                 
                 if not summary_table.empty:
@@ -430,6 +441,7 @@ def main():
                     ).properties(height=350)
                     st.altair_chart(pie_chart, use_container_width=True)
 
+                # Download Processed Data Functionality
                 st.markdown("---")
                 st.subheader("📥 Download Processed Data")
                 st.caption("Download the full dataset with the Closing Date split into separate Date and Time columns.")
@@ -688,7 +700,6 @@ def main():
                     with f4: 
                         role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True, key="f_off_role")
                     
-                    # --- NEW: Use valid_full_df so we can count 'Close' tickets for Closure % ---
                     valid_full_df = df_processed[
                         (~df_processed['Supervisor'].isin(ignore_list)) & 
                         (~df_processed['SFI/JE'].isin(ignore_list))
@@ -709,10 +720,8 @@ def main():
                             filt_df = filt_df[filt_df[target_col] == f_officer]
                             
                         if not filt_df.empty:
-                            # Group by officer and all statuses
                             status_counts = filt_df.groupby([target_col, 'StatusBucket']).size().unstack(fill_value=0)
                             
-                            # Ensure all base statuses are columns
                             for s in STATUS_COLUMNS:
                                 if s not in status_counts.columns:
                                     status_counts[s] = 0
@@ -721,7 +730,6 @@ def main():
                             status_counts['Total Closed'] = status_counts['Close']
                             status_counts['Grand Total'] = status_counts['Total Unresolved Tickets'] + status_counts['Total Closed']
                             
-                            # Calculate Closure %
                             status_counts['Closure %'] = ((status_counts['Total Closed'] / status_counts['Grand Total']) * 100).fillna(0).round(1)
                             
                             status_counts = status_counts.sort_values('Total Unresolved Tickets', ascending=False).reset_index()
@@ -856,45 +864,6 @@ def main():
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary"
                         )
-
-            # ==========================================
-            # GEOSPATIAL MAP (TEMPORARILY DISABLED)
-            # ==========================================
-            # elif st.session_state.current_view == "Geospatial Map":
-            #     st.subheader("🗺️ Geospatial Map")
-            #     st.caption("Visualizing ticket locations across Mathura-Vrindavan.")
-            #     
-            #     if COL_LAT in df_processed.columns and COL_LON in df_processed.columns:
-            #         map_df = df_processed.copy()
-            #         
-            #         map_df[COL_LAT] = pd.to_numeric(map_df[COL_LAT], errors='coerce')
-            #         map_df[COL_LON] = pd.to_numeric(map_df[COL_LON], errors='coerce')
-            #         
-            #         map_df = map_df.dropna(subset=[COL_LAT, COL_LON])
-            #         
-            #         if not map_df.empty:
-            #             map_df = map_df.rename(columns={COL_LAT: 'latitude', COL_LON: 'longitude'})
-            #             
-            #             f1, f2, f3 = st.columns(3)
-            #             with f1:
-            #                 map_cat = st.selectbox("Filter by Category", ["All"] + main_categories)
-            #             with f2:
-            #                 valid_statuses = sorted(df_processed[COL_STATUS].astype(str).unique().tolist())
-            #                 map_status = st.selectbox("Filter by Status", ["All"] + valid_statuses)
-            #             with f3:
-            #                 dot_size = st.slider("Map Dot Size", min_value=10, max_value=1000, value=100, step=10)
-            #                 
-            #             if map_cat != "All":
-            #                 map_df = map_df[map_df['MainCategory'] == map_cat]
-            #             if map_status != "All":
-            #                 map_df = map_df[map_df[COL_STATUS] == map_status]
-            #                 
-            #             st.markdown(f"**Showing {len(map_df)} tickets on map:**")
-            #             st.map(map_df, size=dot_size, use_container_width=True)
-            #         else:
-            #             st.info("No valid latitude/longitude coordinates found in the dataset after cleaning.")
-            #     else:
-            #         st.warning(f"⚠️ **Coordinate Columns Not Found!** Looked for '{COL_LAT}' and '{COL_LON}'.")
 
             elif st.session_state.current_view == "Monthly Trend Analysis":
                 st.subheader("📅 Monthly Trend Analysis")
