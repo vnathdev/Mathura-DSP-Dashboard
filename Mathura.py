@@ -377,7 +377,7 @@ def main():
             if st.session_state.current_view == "Main Category Summary":
                 st.subheader("📈 Main Category Summary")
                 
-                # --- NEW: UPAAY Dashboard (Legacy Data) explicitly placed here ---
+                # --- UPAAY Dashboard (Legacy Data) explicitly placed here ---
                 with st.container():
                     st.markdown("##### 🏛️ UPAAY Dashboard (Legacy Data)")
                     u1, u2, u3, u4 = st.columns(4)
@@ -409,6 +409,52 @@ def main():
                     m3.metric("✅ % Closure", f"{int(round(total_series['% Closure']))}%")
                     
                     st.markdown("<br>", unsafe_allow_html=True)
+                    
+                    # --- NEW FIX: Category Contribution Doughnuts ---
+                    st.markdown("##### 🍩 Category Contribution")
+                    
+                    cat_chart_df = body_df.copy()
+                    cat_chart_df['Category'] = cat_chart_df.index.astype(str) # Flawless extraction of category names
+                    
+                    dc1, dc2 = st.columns(2)
+                    
+                    with dc1:
+                        raised_df = cat_chart_df[['Category', 'Grand Total']].copy()
+                        raised_df = raised_df[raised_df['Grand Total'] > 0]
+                        if not raised_df.empty:
+                            tot_raised = raised_df['Grand Total'].sum()
+                            raised_df['% of Total'] = (raised_df['Grand Total'] / tot_raised * 100).round(1).astype(str) + "%"
+                            
+                            chart_raised = alt.Chart(raised_df).mark_arc(innerRadius=50).encode(
+                                theta=alt.Theta(field="Grand Total", type="quantitative"),
+                                color=alt.Color(field="Category", type="nominal"),
+                                tooltip=['Category', 'Grand Total', '% of Total']
+                            ).properties(height=250, title="Contribution to Total Raised")
+                            
+                            st.altair_chart(chart_raised, use_container_width=True)
+                        else:
+                            st.info("No raised tickets to display.")
+                            
+                    with dc2:
+                        closed_df = cat_chart_df[['Category', 'Close']].copy()
+                        closed_df = closed_df[closed_df['Close'] > 0]
+                        if not closed_df.empty:
+                            tot_closed = closed_df['Close'].sum()
+                            closed_df['% of Total'] = (closed_df['Close'] / tot_closed * 100).round(1).astype(str) + "%"
+                            
+                            chart_closed = alt.Chart(closed_df).mark_arc(innerRadius=50).encode(
+                                theta=alt.Theta(field="Close", type="quantitative"),
+                                color=alt.Color(field="Category", type="nominal"),
+                                tooltip=['Category', 'Close', '% of Total']
+                            ).properties(height=250, title="Contribution to Total Closed")
+                            
+                            st.altair_chart(chart_closed, use_container_width=True)
+                        else:
+                            st.info("No closed tickets to display.")
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    
+                    # --- Category-wise Breakdown Table ---
                     st.markdown("##### 📂 Category-wise Breakdown")
                     st.dataframe(body_df, use_container_width=True, column_config={"% Closure": st.column_config.NumberColumn(format="%.1f%%")})
                 
@@ -482,6 +528,41 @@ def main():
                     view_df = view_df[(view_df[COL_CREATED].dt.date >= start_d) & (view_df[COL_CREATED].dt.date <= end_d)]
                 
                 st.markdown("<br>", unsafe_allow_html=True)
+                
+                # --- NEW: All Doughnut Charts Displayed at the Top ---
+                if not view_df.empty:
+                    st.markdown("##### 🍩 Overall Status by Category")
+                    chart_cols = st.columns(len(main_categories))
+                    
+                    for idx, main_cat in enumerate(main_categories):
+                        with chart_cols[idx]:
+                            sub_df_chart = view_df[view_df['MainCategory'] == main_cat]
+                            if not sub_df_chart.empty:
+                                st.markdown(f"**{main_cat}**")
+                                cat_status_counts = sub_df_chart['StatusBucket'].value_counts().reset_index()
+                                cat_status_counts.columns = ['Status', 'Count']
+                                
+                                # Calculate Percentage for Hover Tooltip
+                                total_cat_tickets = cat_status_counts['Count'].sum()
+                                cat_status_counts['% of Total'] = (cat_status_counts['Count'] / total_cat_tickets * 100).round(1).astype(str) + "%"
+                                
+                                donut_chart = alt.Chart(cat_status_counts).mark_arc(innerRadius=40).encode(
+                                    theta=alt.Theta(field="Count", type="quantitative"),
+                                    color=alt.Color(field="Status", type="nominal", 
+                                                    scale=alt.Scale(
+                                                        domain=STATUS_COLUMNS,
+                                                        range=['#EF4444', '#F59E0B', '#8B5CF6', '#9CA3AF', '#10B981'] 
+                                                    )),
+                                    tooltip=['Status', 'Count', '% of Total']
+                                ).properties(height=220)
+                                
+                                st.altair_chart(donut_chart, use_container_width=True)
+                            else:
+                                st.info(f"No {main_cat} data.")
+                
+                st.markdown("---")
+                
+                # --- Existing Tables in Tabs Below the Charts ---
                 tabs = st.tabs(main_categories)
                 for tab, main_cat in zip(tabs, main_categories):
                     with tab:
@@ -491,6 +572,9 @@ def main():
                         else:
                             st.info("No data for this category in the selected date range.")
 
+                # ==========================================
+                # TICKET INSPECTOR (DEEP DIVE)
+                # ==========================================
                 st.markdown("---")
                 st.subheader("🔎 Ticket Inspector (Deep Dive)")
                 st.caption("Use the filters below to pull up specific raw tickets based on the summary numbers above.")
@@ -584,7 +668,51 @@ def main():
                     st.markdown("##### 📍 Zone Comparison by Status & Closure Time")
                     b3_cat_all = st.selectbox("Select Main Category (For Zone Comparison)", main_categories, key="b3_cat_all")
                     zone_matrix_df = view_df[view_df['MainCategory'] == b3_cat_all]
+                    
                     if not zone_matrix_df.empty:
+                        # --- NEW: Conditional Layout Doughnut Charts for Each Zone ---
+                        st.markdown(f"##### 🍩 {b3_cat_all} Status Breakdown by Zone")
+                        unique_zones = sorted(zone_matrix_df[COL_ZONE].dropna().unique())
+                        
+                        if unique_zones:
+                            total_zones = len(unique_zones)
+                            
+                            # Layout Logic: <= 3 zones in one row. > 3 zones = 2 per row.
+                            cols_per_row = total_zones if total_zones <= 3 else 2
+                            
+                            for i in range(0, total_zones, cols_per_row):
+                                chunk = unique_zones[i:i + cols_per_row]
+                                chart_cols = st.columns(cols_per_row) # Fixed width ensures trailing charts don't stretch
+                                
+                                for idx, zone_name in enumerate(chunk):
+                                    with chart_cols[idx]:
+                                        z_df = zone_matrix_df[zone_matrix_df[COL_ZONE] == zone_name]
+                                        if not z_df.empty:
+                                            st.markdown(f"**{zone_name}**")
+                                            z_status_counts = z_df['StatusBucket'].value_counts().reset_index()
+                                            z_status_counts.columns = ['Status', 'Count']
+                                            
+                                            # Calculate Percentage for Hover Tooltip
+                                            total_z_tickets = z_status_counts['Count'].sum()
+                                            z_status_counts['% of Total'] = (z_status_counts['Count'] / total_z_tickets * 100).round(1).astype(str) + "%"
+                                            
+                                            donut_chart = alt.Chart(z_status_counts).mark_arc(innerRadius=40).encode(
+                                                theta=alt.Theta(field="Count", type="quantitative"),
+                                                color=alt.Color(field="Status", type="nominal", 
+                                                                scale=alt.Scale(
+                                                                    domain=STATUS_COLUMNS,
+                                                                    range=['#EF4444', '#F59E0B', '#8B5CF6', '#9CA3AF', '#10B981'] 
+                                                                )),
+                                                tooltip=['Status', 'Count', '% of Total']
+                                            ).properties(height=220)
+                                            
+                                            st.altair_chart(donut_chart, use_container_width=True)
+                                        else:
+                                            st.info(f"No data for {zone_name}")
+                                            
+                        st.markdown("---")
+                        
+                        # --- Existing Pivot Summary Table ---
                         display_with_fixed_footer(generate_pivot_summary(zone_matrix_df, COL_ZONE, "ALL ZONES TOTAL", show_avg_time=True))
                     else:
                         st.info("No data found for this selection.")
@@ -753,18 +881,67 @@ def main():
             elif st.session_state.current_view == "Age-wise Pendency":
                 st.subheader("⏳ Age-wise Pendency Analysis")
                 
-                b5_cat = st.selectbox("Select Category", ["All Categories"] + main_categories)
+                # --- 1. OVERALL GRAPHS (Always visible, unfiltered by the table dropdown) ---
+                base_age_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
+                
+                if not base_age_df.empty:
+                    st.markdown("##### 🍩 Overall Age-wise Breakdown by Category")
+                    unique_main_cats = sorted(base_age_df['MainCategory'].dropna().unique())
+                    
+                    if unique_main_cats:
+                        total_cats = len(unique_main_cats)
+                        
+                        # Layout Logic: <= 3 groups in one row. > 3 groups = 2 per row.
+                        cols_per_row = total_cats if total_cats <= 3 else 2
+                        
+                        for i in range(0, total_cats, cols_per_row):
+                            chunk = unique_main_cats[i:i + cols_per_row]
+                            chart_cols = st.columns(cols_per_row)
+                            
+                            for idx, cat_name in enumerate(chunk):
+                                with chart_cols[idx]:
+                                    cat_df = base_age_df[base_age_df['MainCategory'] == cat_name]
+                                    if not cat_df.empty:
+                                        st.markdown(f"**{cat_name}**")
+                                        cat_age_counts = cat_df['AgeBucket'].value_counts().reset_index()
+                                        cat_age_counts.columns = ['Age Bucket', 'Count']
+                                        
+                                        # Custom intuitive color scale for aging severity
+                                        age_domain = ['< 1 Month', '1-6 Months', '6-12 Months', '> 1 Year']
+                                        age_range = ['#10B981', '#FBBF24', '#F97316', '#EF4444'] 
+                                        
+                                        # Calculate Percentage for Hover Tooltip
+                                        total_cat_tickets = cat_age_counts['Count'].sum()
+                                        cat_age_counts['% of Total'] = (cat_age_counts['Count'] / total_cat_tickets * 100).round(1).astype(str) + "%"
+                                        
+                                        donut_chart = alt.Chart(cat_age_counts).mark_arc(innerRadius=40).encode(
+                                            theta=alt.Theta(field="Count", type="quantitative"),
+                                            color=alt.Color(field="Age Bucket", type="nominal", 
+                                                            scale=alt.Scale(domain=age_domain, range=age_range)),
+                                            tooltip=['Age Bucket', 'Count', '% of Total']
+                                        ).properties(height=220)
+                                        
+                                        st.altair_chart(donut_chart, use_container_width=True)
+                                    else:
+                                        st.info(f"No data for {cat_name}")
+                else:
+                    st.info("No unresolved tickets found across all categories.")
+                    
+                st.markdown("---")
+                
+                # --- 2. FILTER & SUMMARY TABLE ---
+                b5_cat = st.selectbox("Select Category for Summary Table", ["All Categories"] + main_categories)
                 
                 if b5_cat != "All Categories":
-                    age_df = df_processed[(df_processed['MainCategory'] == b5_cat) & (df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES))]
+                    table_age_df = base_age_df[base_age_df['MainCategory'] == b5_cat]
                     grouping_col = 'Subcategory_Clean'
                 else:
-                    age_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)]
+                    table_age_df = base_age_df
                     grouping_col = 'MainCategory'
                     
-                if not age_df.empty:
-                    st.markdown("##### 📊 Age-wise Summary")
-                    st.dataframe(generate_aging_summary(age_df, grouping_col), use_container_width=True)
+                if not table_age_df.empty:
+                    st.markdown("##### 📊 Age-wise Summary Table")
+                    st.dataframe(generate_aging_summary(table_age_df, grouping_col), use_container_width=True)
                 else:
                     st.success("No unresolved tickets found for this category.")
                     
