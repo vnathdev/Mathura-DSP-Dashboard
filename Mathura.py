@@ -812,9 +812,10 @@ def main():
                         draw_leaderboard(malba_df, 'SFI/JE', 'JE')
                         
                     st.markdown("---")
-                    st.markdown("### 🔍 Filtered Officer Pendency View")
+                    st.markdown("### 🔍 Filtered SFI / JE Pendency View")
+                    st.caption("Ward-wise pendency breakdown for Chief Engineers and Sanitary Officers.")
                     
-                    f1, f2, f3, f4 = st.columns(4)
+                    f1, f2, f3 = st.columns(3)
                     with f1: 
                         f_cat = st.selectbox("Category", ["All"] + main_categories, key="f_off_cat")
                     with f2:
@@ -825,30 +826,26 @@ def main():
                         f_sub = st.selectbox("Subcategory", avail_subs, key="f_off_sub")
                     with f3: 
                         f_zone = st.selectbox("Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist()), key="f_off_zone")
-                    with f4: 
-                        role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True, key="f_off_role")
                     
-                    valid_full_df = df_processed[
-                        (~df_processed['Supervisor'].isin(ignore_list)) & 
-                        (~df_processed['SFI/JE'].isin(ignore_list))
-                    ]
+                    # Lock target column to SFI/JE and drop unmapped/missing for this specific view
+                    target_col = 'SFI/JE'
+                    valid_full_df = df_processed[~df_processed[target_col].isin(ignore_list)]
                     
                     filt_df = valid_full_df.copy()
                     if f_cat != "All": filt_df = filt_df[filt_df['MainCategory'] == f_cat]
                     if f_sub != "All": filt_df = filt_df[filt_df['Subcategory_Clean'] == f_sub]
                     if f_zone != "All": filt_df = filt_df[filt_df[COL_ZONE] == f_zone]
                     
-                    target_col = 'Supervisor' if role_type == "Supervisor" else 'SFI/JE'
-                    
                     if not filt_df.empty:
                         officer_list = ["All"] + sorted(filt_df[target_col].dropna().unique().tolist())
-                        f_officer = st.selectbox("Select Specific Officer", officer_list, key="f_off_name")
+                        f_officer = st.selectbox("Select Specific SFI / JE", officer_list, key="f_off_name")
                         
                         if f_officer != "All":
                             filt_df = filt_df[filt_df[target_col] == f_officer]
                             
                         if not filt_df.empty:
-                            status_counts = filt_df.groupby([target_col, 'StatusBucket']).size().unstack(fill_value=0)
+                            # Group by SFI/JE, Zone, and Ward to generate ward-wise rows
+                            status_counts = filt_df.groupby([target_col, COL_ZONE, COL_WARD, 'StatusBucket']).size().unstack(fill_value=0)
                             
                             for s in STATUS_COLUMNS:
                                 if s not in status_counts.columns:
@@ -861,9 +858,13 @@ def main():
                             status_counts['Closure %'] = ((status_counts['Total Closed'] / status_counts['Grand Total']) * 100).fillna(0).round(1)
                             
                             status_counts = status_counts.sort_values('Total Unresolved Tickets', ascending=False).reset_index()
-                            status_counts = status_counts.rename(columns={target_col: 'Officer Name'})
+                            status_counts = status_counts.rename(columns={
+                                target_col: 'SFI / JE Name',
+                                COL_ZONE: 'Zone',
+                                COL_WARD: 'Ward'
+                            })
                             
-                            cols_order = ['Officer Name', 'Total Unresolved Tickets'] + UNRESOLVED_STATUSES + ['Total Closed', 'Grand Total', 'Closure %']
+                            cols_order = ['SFI / JE Name', 'Zone', 'Ward', 'Total Unresolved Tickets'] + UNRESOLVED_STATUSES + ['Total Closed', 'Grand Total', 'Closure %']
                             final_table = status_counts[cols_order]
                             
                             final_table.index = final_table.index + 1
